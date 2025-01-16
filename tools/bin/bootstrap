@@ -2,15 +2,11 @@
 
 echo "Installing packages"
 cd $WORKSPACE_ROOT/deploy
-pnpm install
+bun install
 
 echo "Generating config.user.yaml"
-cd $WORKSPACE_ROOT/deploy/src 
+cd $WORKSPACE_ROOT/deploy/src
 node gen-config.js
-
-echo "Set pulumi secrets"
-cd $WORKSPACE_ROOT/deploy
-pulumi config set digitalocean:token $DIGITAL_OCEAN_API_KEY --secret
 
 echo "Provisioning with pulumi"
 cd $WORKSPACE_ROOT/deploy

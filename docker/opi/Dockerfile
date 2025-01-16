@@ -60,7 +60,8 @@ RUN git clone https://github.com/bestinslot-xyz/OPI.git /usr/local/OPI; \
 	cd /usr/local/OPI/modules/main_index; npm install; \
 	cd /usr/local/OPI/modules/brc20_api; npm install; \
 	cd /usr/local/OPI/modules/bitmap_api; npm install; \
-	cd /usr/local/OPI/modules/sns_api; npm install; 
+	cd /usr/local/OPI/modules/sns_api; npm install; \
+	cd /usr/local/OPI/modules/pow20_api; npm install;
 
 COPY remvoe_pubkey_validate.js /usr/local/OPI/modules/main_index
 RUN node /usr/local/OPI/modules/main_index/remvoe_pubkey_validate.js && rm /usr/local/OPI/modules/main_index/remvoe_pubkey_validate.js

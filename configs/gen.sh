@@ -341,6 +341,86 @@ generate_env_sns_index() {
     } >"sns_index/.env"
 }
 
+# generate env file for pow20_index
+: '
+# .env
+DB_USER="postgres"
+DB_HOST="localhost"
+DB_PORT="5432"
+DB_DATABASE="postgres"
+DB_PASSWD=""
+
+DB_METAPROTOCOL_USER="postgres"
+DB_METAPROTOCOL_HOST="localhost"
+DB_METAPROTOCOL_PORT="5432"
+DB_METAPROTOCOL_DATABASE="postgres"
+DB_METAPROTOCOL_PASSWD=""
+
+NETWORK_TYPE="mainnet"
+
+## reporting system settings
+REPORT_TO_INDEXER="true"
+REPORT_URL="https://api.opi.network/report_block"
+REPORT_RETRIES="10"
+# set a name for report dashboard
+REPORT_NAME="opi_pow20_index"
+'
+generate_env_pow20_index() {
+    mkdir -p pow20_index
+    {
+        echo "DB_USER=\"${DB_USER:-postgres}\""
+        echo "DB_HOST=\"${DB_HOST:-localhost}\""
+        echo "DB_PORT=\"${DB_PORT:-5432}\""
+        echo "DB_DATABASE=\"${DB_DATABASE:-postgres}\""
+        echo "DB_PASSWD=\"${DB_PASSWD}\""
+
+        echo "DB_METAPROTOCOL_USER=\"${DB_METAPROTOCOL_USER:-postgres}\""
+        echo "DB_METAPROTOCOL_HOST=\"${DB_METAPROTOCOL_HOST:-localhost}\""
+        echo "DB_METAPROTOCOL_PORT=\"${DB_METAPROTOCOL_PORT:-5432}\""
+        echo "DB_METAPROTOCOL_DATABASE=\"${DB_METAPROTOCOL_DATABASE:-postgres}\""
+        echo "DB_METAPROTOCOL_PASSWD=\"${DB_METAPROTOCOL_PASSWD}\""
+
+        echo "NETWORK_TYPE=\"${NETWORK_TYPE:-mainnet}\""
+
+        echo "REPORT_TO_INDEXER=\"${REPORT_TO_INDEXER:-true}\""
+        echo "REPORT_URL=\"${REPORT_URL:-https://api.opi.network/report_block}\""
+        echo "REPORT_RETRIES=\"${REPORT_RETRIES:-10}\""
+        echo "REPORT_NAME=\"${REPORT_NAME:-opi_pow20_index}\""
+    } >"pow20_index/.env"
+}
+
+# generate env file for pow20_api
+: '
+# .env
+DB_USER="postgres"
+DB_HOST="localhost"
+DB_PORT="5432"
+DB_DATABASE="postgres"
+DB_PASSWD=""
+DB_SSL="true"
+DB_MAX_CONNECTIONS=10
+
+API_HOST="127.0.0.1"
+API_PORT="8003"
+API_TRUSTED_PROXY_CNT="0"
+'
+generate_env_pow20_api() {
+    mkdir -p pow20_api
+    {
+        echo "DB_USER=\"${DB_USER:-postgres}\""
+        echo "DB_HOST=\"${DB_HOST:-localhost}\""
+        echo "DB_PORT=\"${DB_PORT:-5432}\""
+        echo "DB_DATABASE=\"${DB_DATABASE:-postgres}\""
+        echo "DB_PASSWD=\"${DB_PASSWD}\""
+        echo "DB_SSL=\"${DB_SSL:-true}\""
+        echo "DB_MAX_CONNECTIONS=${DB_MAX_CONNECTIONS:-10}"
+
+        echo "API_HOST=\"${API_HOST:-127.0.0.1}\""
+        echo "API_PORT=\"${API_PORT:-8003}\""
+        echo "API_TRUSTED_PROXY_CNT=\"${API_TRUSTED_PROXY_CNT:-0}\""
+    } >"pow20_api/.env"
+}
+
 rm -rf bitmap_api
 rm -rf bitmap_index
 rm -rf brc20_api
@@ -356,6 +436,8 @@ generate_env_brc20_index
 generate_env_main_index
 generate_env_sns_api
 generate_env_sns_index
+generate_env_pow20_index
+generate_env_pow20_api
 
 green() {
     echo -e "\033[32m$1\033[0m"

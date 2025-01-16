@@ -26,6 +26,8 @@ services:
       - ${WORKSPACE_ROOT}/configs/main_index/.env:/usr/local/OPI/modules/main_index/.env
       - ${WORKSPACE_ROOT}/configs/sns_api/.env:/usr/local/OPI/modules/sns_api/.env
       - ${WORKSPACE_ROOT}/configs/sns_index/.env:/usr/local/OPI/modules/sns_index/.env
+      - ${WORKSPACE_ROOT}/configs/pow20_api/.env:/usr/local/OPI/modules/pow20_api/.env
+      - ${WORKSPACE_ROOT}/configs/pow20_index/.env:/usr/local/OPI/modules/pow20_index/.env
       - ${ORD_DATADIR}:/ord_data
     depends_on:
       postgres-opi-server:

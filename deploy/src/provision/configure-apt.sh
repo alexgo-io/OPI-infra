@@ -2,53 +2,88 @@
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Stop and disable apt-daily upgrade services;
-systemctl stop apt-daily.timer
-systemctl disable apt-daily.timer
-systemctl disable apt-daily.service
-systemctl stop apt-daily-upgrade.timer
-systemctl disable apt-daily-upgrade.timer
-systemctl disable apt-daily-upgrade.service
+# Function to check if a service exists
+service_exists() {
+    systemctl list-unit-files | grep -q "^$1"
+}
 
-# Enable retry logic for apt up to 10 times
-echo "APT::Acquire::Retries \"10\";" > /etc/apt/apt.conf.d/80-retries
+# Function to check if a package is installed
+is_package_installed() {
+    dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+}
 
-# Configure apt to always assume Y
-echo "APT::Get::Assume-Yes \"true\";" > /etc/apt/apt.conf.d/90assumeyes
+# Stop and disable apt-daily upgrade services if they exist
+for service in apt-daily.timer apt-daily.service apt-daily-upgrade.timer apt-daily-upgrade.service; do
+    if service_exists "$service"; then
+        systemctl stop "$service" 2>/dev/null || true
+        systemctl disable "$service" 2>/dev/null || true
+    fi
+done
 
-# APT understands a field called Phased-Update-Percentage which can be used to control the rollout of a new version. It is an integer between 0 and 100.
-# In case you have multiple systems that you want to receive the same set of updates, 
-# you can set APT::Machine-ID to a UUID such that they all phase the same, 
-# or set APT::Get::Never-Include-Phased-Updates or APT::Get::Always-Include-Phased-Updates to true such that APT will never/always consider phased updates.
-# apt-cache policy pkgname
-echo 'APT::Get::Always-Include-Phased-Updates "true";' > /etc/apt/apt.conf.d/99-phased-updates
-
-# Fix bad proxy and http headers settings
-cat <<EOF >> /etc/apt/apt.conf.d/99bad_proxy
+# Configure apt settings only if they don't exist
+for conf in "80-retries" "90assumeyes" "99-phased-updates" "99bad_proxy"; do
+    if [ ! -f "/etc/apt/apt.conf.d/$conf" ]; then
+        case "$conf" in
+            "80-retries")
+                echo 'APT::Acquire::Retries "10";' > "/etc/apt/apt.conf.d/$conf"
+                ;;
+            "90assumeyes")
+                echo 'APT::Get::Assume-Yes "true";' > "/etc/apt/apt.conf.d/$conf"
+                ;;
+            "99-phased-updates")
+                echo 'APT::Get::Always-Include-Phased-Updates "true";' > "/etc/apt/apt.conf.d/$conf"
+                ;;
+            "99bad_proxy")
+                cat > "/etc/apt/apt.conf.d/$conf" <<EOF
 Acquire::http::Pipeline-Depth 0;
 Acquire::http::No-Cache true;
 Acquire::BrokenProxy    true;
 EOF
+                ;;
+        esac
+    fi
+done
 
-# Uninstall unattended-upgrades
-rm -rf /var/log/unattended-upgrades
-apt-get purge unattended-upgrades -y
+# Uninstall unattended-upgrades if installed
+if is_package_installed "unattended-upgrades"; then
+    rm -rf /var/log/unattended-upgrades
+    apt-get purge unattended-upgrades -y
+fi
 
-apt-get install -yq apt-transport-https ca-certificates curl software-properties-common \
-    ca-certificates \
-    curl \
-    gnupg \
-    wget \
-    git \
-    build-essential \
-    ncdu \
-    bpytop \
-    pbzip2 \
+# Install required packages if not already installed
+PACKAGES=(
+    apt-transport-https
+    ca-certificates
+    curl
+    software-properties-common
+    gnupg
+    wget
+    git
+    build-essential
+    ncdu
+    bpytop
+    pbzip2
     lsb-release
+)
 
-apt-get -yq update
-apt-get -yq dist-upgrade
+# Create a list of packages that need to be installed
+TO_INSTALL=()
+for pkg in "${PACKAGES[@]}"; do
+    if ! is_package_installed "$pkg"; then
+        TO_INSTALL+=("$pkg")
+    fi
+done
 
-# Install apt-fast using quick-install.sh
-# https://github.com/ilikenwf/apt-fast
-# bash -c "$(curl -fsSL https://raw.githubusercontent.com/ilikenwf/apt-fast/master/quick-install.sh)"
+# Only run apt-get if there are packages to install
+if [ ${#TO_INSTALL[@]} -gt 0 ]; then
+    # Update package list
+    apt-get update -yq
+
+    # Install missing packages
+    apt-get install -yq "${TO_INSTALL[@]}"
+fi
+
+# Only run dist-upgrade if there are upgrades available
+if apt-get -s dist-upgrade | grep -q "^Inst"; then
+    apt-get -yq dist-upgrade
+fi

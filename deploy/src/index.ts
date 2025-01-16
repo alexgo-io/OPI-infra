@@ -1,70 +1,145 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import { local, remote } from '@pulumi/command';
-import type { types } from '@pulumi/command';
-import * as digitalocean from '@pulumi/digitalocean';
+import * as command from '@pulumi/command';
 import * as pulumi from '@pulumi/pulumi';
 import * as time from '@pulumiverse/time';
+import { z } from 'zod';
 import YAML from 'yaml';
 import {
   generateDirectoryHash,
-  getScript,
-  root,
-  root$,
+  workspace,
   transformFile,
   unroot,
 } from './utils';
 
-import { getPrivateKey, sshKey } from './keys';
+const BitcoindExternalSchema = z.object({
+  host: z.string(),
+  port: z.number(),
+  rpc_user: z.string(),
+  rpc_password: z.string(),
+  zmq_port: z.number(),
+});
 
-export function provisionInstance(params: {
-  name: string;
-  connection: types.input.remote.ConnectionArgs;
+const BitcoindLocalSchema = z.object({
+  port: z.number(),
+  rpc_user: z.string(),
+  rpc_password: z.string(),
+  zmq_port: z.number(),
+  db_cache: z.number(),
+});
+
+const BitcoindConfigSchema = z.object({
+  deploy: z.boolean(),
+  external: BitcoindExternalSchema.optional(),
+  local: BitcoindLocalSchema.optional(),
+}).refine(
+  (data) => {
+    if (data.deploy) {
+      return data.local !== undefined;
+    }
+    return data.external !== undefined;
+  },
+  { message: "Must provide 'local' config when deploy is true, or 'external' config when deploy is false" }
+);
+
+const InstanceSchema = z.object({
+  name: z.string(),
+  host: z.string(),
+  user: z.string(),
+  ssh_key_path: z.string(),
+  data_path: z.string(),
+  bitcoind: BitcoindConfigSchema.optional(),
+});
+
+type Instance = z.infer<typeof InstanceSchema>;
+
+export async function provisionInstance(params: {
+  instance: Instance;
+  privateKey: string;
+  dataPath: string;
 }) {
-  const { connection, name } = params;
+  const { instance, privateKey } = params;
 
-  const setupCommands = execScriptsOnRemote(name, connection, [
-    root('deploy/src/provision/configure-apt-mock.sh'),
-    root('deploy/src/provision/configure-apt.sh'),
-    root('deploy/src/provision/setup.sh'),
-    root('deploy/src/provision/pull.sh'),
+  // Create connection configuration with environment
+  const connection: command.types.input.remote.ConnectionArgs & { environment?: Record<string, string> } = {
+    host: instance.host,
+    user: instance.user,
+    privateKey,
+    environment: {},
+  };
+
+  // Set bitcoind environment variables based on configuration
+  const bitcoindEnv: Record<string, string> = {};
+  if (instance.bitcoind) {
+    if (instance.bitcoind.deploy) {
+      // Local bitcoind configuration
+      const local = instance.bitcoind.local!;
+      bitcoindEnv.DEPLOY_BITCOIND = 'true';
+      bitcoindEnv.BITCOIN_RPC_PORT = local.port.toString();
+      bitcoindEnv.BITCOIN_RPC_USER = local.rpc_user;
+      bitcoindEnv.BITCOIN_RPC_PASSWD = local.rpc_password;
+      bitcoindEnv.BITCOIN_ZMQ_PORT = local.zmq_port.toString();
+      bitcoindEnv.BITCOIN_DB_CACHE = local.db_cache.toString();
+    } else {
+      // External bitcoind configuration
+      const external = instance.bitcoind.external!;
+      bitcoindEnv.DEPLOY_BITCOIND = 'false';
+      bitcoindEnv.BITCOIN_RPC_URL = `http://${external.host}:${external.port}`;
+      bitcoindEnv.BITCOIN_RPC_USER = external.rpc_user;
+      bitcoindEnv.BITCOIN_RPC_PASSWD = external.rpc_password;
+      bitcoindEnv.BITCOIN_ZMQ_PORT = external.zmq_port.toString();
+    }
+  } else {
+    // Default to deploying bitcoind locally with default settings
+    bitcoindEnv.DEPLOY_BITCOIND = 'true';
+    bitcoindEnv.BITCOIN_RPC_PORT = '8332';
+    bitcoindEnv.BITCOIN_RPC_USER = 'bitcoin';
+    bitcoindEnv.BITCOIN_RPC_PASSWD = 'password';
+    bitcoindEnv.BITCOIN_ZMQ_PORT = '18543';
+    bitcoindEnv.BITCOIN_DB_CACHE = '12000';
+  }
+
+  // Add bitcoind environment variables to the connection
+  connection.environment = {
+    ...connection.environment,
+    ...bitcoindEnv,
+  };
+
+  // Execute setup commands
+  const setupCommands = execScriptsOnRemote(instance.name, connection, [
+    workspace('deploy/src/provision/configure-apt.sh').absolutePath,
+    workspace('deploy/src/provision/setup.sh').absolutePath,
   ]);
 
-  const reboot = new remote.Command(
-    `${name}:reboot`,
-    {
-      connection,
-      create: `bash -c 'sleep 10 && /sbin/shutdown -r now &'`,
-      environment: { DEBIAN_FRONTEND: 'noninteractive' },
-    },
-    { dependsOn: setupCommands },
-  );
-
-  const wait = new time.Sleep(
-    `${name}:wait60Seconds`,
-    { createDuration: '60s' },
-    {
-      dependsOn: [reboot],
-    },
-  );
-
-  return execScriptOnRemote(
-    name,
+  // Reboot and wait
+  const reboot = new command.remote.Command(`${instance.name}:reboot`, {
     connection,
-    root('deploy/src/provision/cleanup.sh'),
-    {
-      commandOpts: { dependsOn: [wait] },
-    },
+    create: 'sudo reboot',
+  }, { dependsOn: setupCommands });
+
+  const wait = new time.Sleep(`${instance.name}:wait60Seconds`,
+    { createDuration: '60s' },
+    { dependsOn: reboot }
   );
+
+  // Cleanup
+  const cleanup = execScriptOnRemote(
+    instance.name,
+    connection,
+    workspace('deploy/src/provision/cleanup.sh').absolutePath,
+    { commandOpts: { dependsOn: wait } }
+  );
+
+  return cleanup;
 }
 
 export function execScriptsOnRemote(
   name: string,
-  connection: types.input.remote.ConnectionArgs,
+  connection: command.types.input.remote.ConnectionArgs,
   locations: string[],
 ) {
-  let command: remote.Command | null = null;
-  const commands: remote.Command[] = [];
+  let command: command.remote.Command | null = null;
+  const commands: command.remote.Command[] = [];
   for (const loc of locations) {
     if (command == null) {
       command = execScriptOnRemote(name, connection, loc);
@@ -84,7 +159,7 @@ export function execScriptsOnRemote(
 
 export function execScriptOnRemote(
   name: string,
-  connection: types.input.remote.ConnectionArgs,
+  connection: command.types.input.remote.ConnectionArgs,
   loc: string,
   options: {
     cwd?: pulumi.Output<string>;
@@ -97,7 +172,7 @@ export function execScriptOnRemote(
     .digest('hex');
 
   if (options.cwd) {
-    return new remote.Command(
+    return new command.remote.Command(
       `${name}:run:remote[d]: ${unroot(loc)}`,
       {
         connection,
@@ -113,7 +188,7 @@ export function execScriptOnRemote(
     );
   }
 
-  return new remote.Command(
+  return new command.remote.Command(
     `${name}:run:remote: ${unroot(loc)}`,
     {
       connection,
@@ -127,111 +202,81 @@ export function execScriptOnRemote(
   );
 }
 
-const image = 'ubuntu-22-04-x64';
+export function create(params: {
+  name: string;
+  host: string;
+  user: string;
+  sshKeyPath: string;
+  dataPath: string;
+}) {
+  const { name, host, user, sshKeyPath, dataPath } = params;
 
-export function create(params: { name: string; region: string; size: string }) {
-  const { region, size, name } = params;
-  const snapshotId = (() => {
-    const id = process.env.OPI_VOLUME_SNAPSHOT_ID;
-    return id?.length === 0 ? undefined : id;
-  })();
-
-  // create instance
-
-  const droplet = new digitalocean.Droplet(`${name}-droplet`, {
-    image,
-    region,
-    size,
-    sshKeys: [sshKey.id],
-  });
-  const privateKey = getPrivateKey();
-
-  const connection: types.input.remote.ConnectionArgs = {
-    host: droplet.ipv4Address,
-    user: 'root',
-    privateKey,
+  const connection: command.types.input.remote.ConnectionArgs = {
+    host,
+    user,
+    privateKey: fs.readFileSync(sshKeyPath, 'utf-8'),
     dialErrorLimit: 50,
   };
 
-  const provision = provisionInstance({ name, connection });
+  const provision = provisionInstance({
+    instance: {
+      name,
+      host,
+      user,
+      ssh_key_path: sshKeyPath,
+      data_path: dataPath
+    },
+    privateKey: connection.privateKey as string,
+    dataPath
+  });
 
   const copyConfigDir = (loc: string, remotePath: pulumi.Output<string>) => {
     if (!fs.existsSync(loc)) {
       throw new Error(`not found: ${loc}`);
     }
     const hash = generateDirectoryHash(loc).slice(0, 5);
-    return new local.Command(`${name}:copyFiles ${unroot(loc)}`, {
-      create: pulumi.interpolate`rsync -avP -e "ssh -i ${process.env.PRIVATE_KEY_PATH}" ${loc} ${connection.user}@${droplet.ipv4Address}:${remotePath}`,
+    return new command.local.Command(`${name}:copyFiles ${unroot(loc)}`, {
+      create: pulumi.interpolate`rsync -avP -e "ssh -i ${sshKeyPath}" ${loc} ${user}@${host}:${remotePath}`,
       triggers: [hash, loc, remotePath],
     });
   };
 
-  const volume = new digitalocean.Volume(
-    `${name}volume`,
-    {
-      region,
-      size: Number.parseInt(process.env.OPI_VOLUME_SIZE ?? '1000', 10),
-      initialFilesystemType: 'ext4',
-      snapshotId,
-    },
-    { dependsOn: [provision, droplet] },
-  );
-  // mount disk
-  const volumeAttachment = new digitalocean.VolumeAttachment(
-    `${name}-volume-attachment`,
-    {
-      dropletId: droplet.id.apply((id) => Number.parseInt(id, 10)),
-      volumeId: volume.id,
-    },
-  );
-
-  const volumePathPrint = new remote.Command(
-    `${name}-read-volume-path`,
+  // Create data directory
+  const createDataDir = new command.remote.Command(
+    `${name}-create-data-dir`,
     {
       connection,
-      create: getScript('print_mnt_name.sh'),
+      create: `mkdir -p ${dataPath}`,
     },
     {
-      dependsOn: [droplet, volumeAttachment, volume],
-      customTimeouts: { create: '5m' },
+      dependsOn: [provision],
     },
   );
 
   // cp restore files
-  const cpRestoreDockerCompose = volumePathPrint.stdout.apply((volumeName) => {
-    const localPath = transformFile(
-      name,
-      './src/docker-composes/restore.docker-compose.yaml',
-      [
-        ['${OPI_PG_DATA_PATH}', `${volumeName}/pg_data`],
-        ['${OPI_IMAGE}', process.env.OPI_IMAGE!],
-        ['${DB_USER}', process.env.DB_USER!],
-        ['${DB_PASSWD}', process.env.DB_PASSWD!],
-        ['${DB_DATABASE}', process.env.DB_DATABASE!],
-        ['${WORKSPACE_ROOT}', volumeName],
-        ['${ORD_DATADIR}', `${volumeName}/ord_data`],
-      ],
-    );
-
-    const file = fs.readFileSync(localPath, 'utf-8');
-    const hash = createHash('md5').update(file).digest('hex').slice(0, 5);
-    const remotePath = `${volumeName}/restore.docker-compose.yaml`;
-
-    return new remote.CopyFile(`${name}:restore`, {
+  const cpRestoreDockerCompose = new command.remote.Command(
+    `${name}:cp:restore-docker-compose`,
+    {
       connection,
-      localPath,
-      remotePath,
-      triggers: [hash, localPath],
-    });
-  });
-
-  const cpConfig = copyConfigDir(
-    root('configs'),
-    pulumi.interpolate`${volumePathPrint.stdout}`,
+      create: pulumi.interpolate`mkdir -p ${dataPath} && cd ${dataPath} && cat > restore.docker-compose.yaml << 'EOL'
+${transformFile(name, './src/docker-composes/restore.docker-compose.yaml', [
+  ['${OPI_PG_DATA_PATH}', `${dataPath}/pg_data`],
+  ['${OPI_IMAGE}', process.env.OPI_IMAGE!],
+  ['${DB_USER}', process.env.DB_USER!],
+  ['${DB_PASSWD}', process.env.DB_PASSWD!],
+  ['${DB_DATABASE}', process.env.DB_DATABASE!],
+  ['${WORKSPACE_ROOT}', dataPath],
+  ['${ORD_DATADIR}', `${dataPath}/ord_data`],
+])}
+EOL`,
+    },
+    { dependsOn: [createDataDir] },
   );
 
+  const cpConfig = copyConfigDir(workspace('configs').absolutePath, pulumi.interpolate`${dataPath}`);
+
   // create swap space
-  execScriptOnRemote(name, connection, root('deploy/src/scripts/mkswap.sh'), {
+  execScriptOnRemote(name, connection, workspace('deploy/src/scripts/mkswap.sh').absolutePath, {
     commandOpts: { dependsOn: [provision] },
   });
 
@@ -239,102 +284,63 @@ export function create(params: { name: string; region: string; size: string }) {
   const restore = execScriptOnRemote(
     name,
     connection,
-    root('deploy/src/scripts/restore.sh'),
+    workspace('deploy/src/scripts/restore.sh').absolutePath,
     {
-      cwd: pulumi.interpolate`${volumePathPrint.stdout}`,
+      cwd: pulumi.interpolate`${dataPath}`,
       commandOpts: {
         dependsOn: [cpConfig, cpRestoreDockerCompose],
       },
-    },
+    }
   );
 
   // cp service docker-compose file
-  /**
-   * Applies transformations to the opi docker compose file, copies it to the remote volume,
-   * and starts the opi docker compose stack.
-   * Depends on the restore script finishing first.
-   */
-  volumePathPrint.stdout.apply((volumeName) => {
-    const localPath = transformFile(
-      name,
-      './src/docker-composes/opi.docker-compose.yaml',
-      [
-        ['${OPI_PG_DATA_PATH}', `${volumeName}/pg_data`],
-        ['${OPI_BITCOIND_PATH}', `${volumeName}/bitcoind_data`],
-        ['${OPI_IMAGE}', process.env.OPI_IMAGE!],
-        ['${BITCOIND_IMAGE}', process.env.BITCOIND_IMAGE!],
-        ['${DB_USER}', process.env.DB_USER!],
-        ['${DB_PASSWD}', process.env.DB_PASSWD!],
-        ['${DB_DATABASE}', process.env.DB_DATABASE!],
-        ['${WORKSPACE_ROOT}', volumeName],
-        ['${BITCOIN_RPC_USER}', process.env.BITCOIN_RPC_USER!],
-        ['${BITCOIN_RPC_PASSWD}', process.env.BITCOIN_RPC_PASSWD!],
-        ['${BITCOIN_RPC_PORT}', process.env.BITCOIN_RPC_PORT!],
-        ['${ORD_DATADIR}', `${volumeName}/ord_data`],
-        ['${BITCOIN_CHAIN_FOLDER}', `${volumeName}/bitcoind_data/datadir`],
-      ],
-    );
-    const file = fs.readFileSync(localPath, 'utf-8');
-    const hash = createHash('md5').update(file).digest('hex').slice(0, 5);
-
-    const cpDockerCompose = new remote.CopyFile(
-      `${name}:cp:opi.docker-compose. -> ${volumeName}`,
-      {
-        connection,
-        localPath,
-        remotePath: `${volumeName}/opi.docker-compose.yaml`,
-        triggers: [hash, localPath],
-      },
-      { dependsOn: [restore] },
-    );
-
-    // start opi
-    new remote.Command(
-      `${name}:start-opi...`,
-      {
-        connection,
-        create: pulumi.interpolate`cd ${volumePathPrint.stdout} && docker-compose -f opi.docker-compose.yaml pull && docker-compose -f opi.docker-compose.yaml up -d`,
-        triggers: [hash],
-      },
-      { dependsOn: [cpDockerCompose] },
-    );
-  });
-
-  exports[`ip_${name}`] = droplet.ipv4Address;
-  exports[`name_${name}`] = droplet.name;
-  exports[`volume_id_${name}`] = volume.id;
-  exports[`volume_attachment_id_${name}`] = volumeAttachment.id;
-  exports[`volume_path_${name}`] = volumePathPrint.stdout;
-
-  return { droplet, volume, name };
-}
-
-interface Instance {
-  name: string;
-  region: string;
-  size: string;
-}
-
-function validateInstance(instance: unknown): instance is Instance {
-  return (
-    typeof instance === 'object' &&
-    instance !== null &&
-    'name' in instance &&
-    'region' in instance &&
-    'size' in instance &&
-    typeof (instance as Instance).name === 'string' &&
-    typeof (instance as Instance).region === 'string' &&
-    typeof (instance as Instance).size === 'string'
+  const cpDockerCompose = new command.remote.Command(
+    `${name}:cp:opi-docker-compose`,
+    {
+      connection,
+      create: pulumi.interpolate`cd ${dataPath} && cat > opi.docker-compose.yaml << 'EOL'
+${transformFile(name, './src/docker-composes/opi.docker-compose.yaml', [
+  ['${OPI_PG_DATA_PATH}', `${dataPath}/pg_data`],
+  ['${OPI_BITCOIND_PATH}', `${dataPath}/bitcoind_data`],
+  ['${OPI_IMAGE}', process.env.OPI_IMAGE!],
+  ['${BITCOIND_IMAGE}', process.env.BITCOIND_IMAGE!],
+  ['${DB_USER}', process.env.DB_USER!],
+  ['${DB_PASSWD}', process.env.DB_PASSWD!],
+  ['${DB_DATABASE}', process.env.DB_DATABASE!],
+  ['${WORKSPACE_ROOT}', dataPath],
+  ['${BITCOIN_RPC_USER}', process.env.BITCOIN_RPC_USER!],
+  ['${BITCOIN_RPC_PASSWD}', process.env.BITCOIN_RPC_PASSWD!],
+  ['${BITCOIN_RPC_PORT}', process.env.BITCOIN_RPC_PORT!],
+  ['${ORD_DATADIR}', `${dataPath}/ord_data`],
+  ['${BITCOIN_CHAIN_FOLDER}', `${dataPath}/bitcoind_data/datadir`],
+])}
+EOL`,
+    },
+    { dependsOn: [restore] },
   );
+
+  // start opi
+  new command.remote.Command(
+    `${name}:start-opi...`,
+    {
+      connection,
+      create: pulumi.interpolate`cd ${dataPath} && docker-compose -f opi.docker-compose.yaml pull && docker-compose -f opi.docker-compose.yaml up -d`,
+      triggers: [cpDockerCompose.stdout],
+    },
+    { dependsOn: [cpDockerCompose] },
+  );
+
+  return { name, host };
 }
 
 function readYamlAndCreateInstance() {
   // read yaml file
   const file = (() => {
-    if (fs.existsSync(root$('deploy/src/config.user.yaml'))) {
-      return fs.readFileSync(root('deploy/src/config.user.yaml'), 'utf8');
+    const userConfig = workspace('deploy/src/config.user.yaml', false);
+    if (userConfig.exists) {
+      return fs.readFileSync(userConfig.absolutePath, 'utf8');
     }
-    return fs.readFileSync(root('deploy/src/config.yaml'), 'utf8');
+    return fs.readFileSync(workspace('deploy/src/config.yaml').absolutePath, 'utf8');
   })();
 
   // parse yaml file
@@ -342,18 +348,32 @@ function readYamlAndCreateInstance() {
   const instances = [];
 
   for (const serviceName in data.services) {
-    // validate required fields
-    const instance = {
-      name: serviceName,
-      region: data.services[serviceName].region,
-      size: data.services[serviceName].size,
-    };
+    try {
+      // validate and parse instance data using Zod
+      const instance = InstanceSchema.parse({
+        name: serviceName,
+        host: data.services[serviceName].host,
+        user: data.services[serviceName].user,
+        ssh_key_path: data.services[serviceName].ssh_key_path,
+        data_path: data.services[serviceName].data_path,
+        bitcoind: data.services[serviceName].bitcoind,
+      });
 
-    if (validateInstance(instance)) {
       // create instance and push to instances array
-      instances.push(create(instance));
-    } else {
-      throw new Error(`Invalid instance data '${JSON.stringify(instance)}'`);
+      instances.push(
+        create({
+          name: instance.name,
+          host: instance.host,
+          user: instance.user,
+          sshKeyPath: instance.ssh_key_path,
+          dataPath: instance.data_path,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw new Error(`Invalid instance data for '${serviceName}': ${error.errors.map(e => e.message).join(', ')}`);
+      }
+      throw error;
     }
   }
 

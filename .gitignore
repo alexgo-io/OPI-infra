@@ -6,6 +6,8 @@ configs/brc20_index
 configs/main_index
 configs/sns_api
 configs/sns_index
+configs/pow20_api
+configs/pow20_index
 .envrc.override
 deploy/node_modules
 .vscode/sftp.json

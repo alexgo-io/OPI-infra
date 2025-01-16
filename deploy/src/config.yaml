@@ -1,10 +1,31 @@
 services:
-  opi1sfo:
-    region: 'sfo3'
-    size: 's-8vcpu-16gb-amd'
-  opi1lon:
-    region: 'lon1'
-    size: 's-8vcpu-16gb-amd'
-  opi1sgp:
-    region: 'sgp1'
-    size: 's-8vcpu-16gb-amd'
+  opi1:
+    host: "192.168.1.100"
+    user: "root"
+    ssh_key_path: "~/.ssh/id_rsa"
+    data_path: "/mnt/data"
+    bitcoind:
+      # Set to false to use an external bitcoind instance
+      deploy: false
+      # Configuration for external bitcoind (required if deploy is false)
+      external:
+        host: "192.168.1.200"
+        port: 8332
+        rpc_user: "bitcoin"
+        rpc_password: "your-secure-password"
+        zmq_port: 18543
+  opi2:
+    host: "192.168.1.101"
+    user: "root"
+    ssh_key_path: "~/.ssh/id_rsa"
+    data_path: "/mnt/data"
+    bitcoind:
+      # Set to true to deploy bitcoind locally
+      deploy: true
+      # Configuration for local bitcoind (used if deploy is true)
+      local:
+        port: 8332
+        rpc_user: "bitcoin"
+        rpc_password: "your-secure-password"
+        zmq_port: 18543
+        db_cache: 12000

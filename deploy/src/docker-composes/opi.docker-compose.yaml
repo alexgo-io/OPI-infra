@@ -16,7 +16,8 @@ services:
       retries: 5
     ports:
       - "21432:5432"
-  bitcoind:
+  # Bitcoind service is now conditional based on DEPLOY_BITCOIND environment variable
+  ${DEPLOY_BITCOIND:+bitcoind}:
     image: ${BITCOIND_IMAGE}
     restart: always
     volumes:
@@ -24,8 +25,12 @@ services:
     environment:
       - BITCOIN_RPC_USER=${BITCOIN_RPC_USER}
       - BITCOIN_RPC_PASSWD=${BITCOIN_RPC_PASSWD}
+      - BITCOIN_RPC_PORT=${BITCOIN_RPC_PORT:-8332}
+      - BITCOIN_ZMQ_PORT=${BITCOIN_ZMQ_PORT:-18543}
+      - BITCOIN_DB_CACHE=${BITCOIN_DB_CACHE:-12000}
     ports:
-      - "${BITCOIN_RPC_PORT}:${BITCOIN_RPC_PORT}"
+      - "${BITCOIN_RPC_PORT:-8332}:${BITCOIN_RPC_PORT:-8332}"
+      - "${BITCOIN_ZMQ_PORT:-18543}:${BITCOIN_ZMQ_PORT:-18543}"
   meta-protocol-indexer:
     image: ${OPI_IMAGE}
     restart: always
@@ -37,6 +42,9 @@ services:
     depends_on:
       postgres-opi-server:
         condition: service_healthy
+      # Make bitcoind dependency conditional
+      ${DEPLOY_BITCOIND:+bitcoind}:
+        condition: service_started
   brc20-indexer:
     image: ${OPI_IMAGE}
     restart: always
@@ -64,7 +72,7 @@ services:
       postgres-opi-server:
         condition: service_healthy
   bitmap-api:
-    image: ${OPI_IMAGE} 
+    image: ${OPI_IMAGE}
     command: 'bash -c "cd /usr/local/OPI/modules/bitmap_api && node api.js"'
     volumes:
       - ./configs/bitmap_api/.env:/usr/local/OPI/modules/bitmap_api/.env
@@ -82,9 +90,26 @@ services:
         condition: service_healthy
   sns-api:
     image: ${OPI_IMAGE}
-    command: 'bash -c "cd /usr/local/OPI/modules/sns_api && node api.js"' 
+    command: 'bash -c "cd /usr/local/OPI/modules/sns_api && node api.js"'
     volumes:
       - ./configs/sns_api/.env:/usr/local/OPI/modules/sns_api/.env
+    depends_on:
+      postgres-opi-server:
+        condition: service_healthy
+  pow20-indexer:
+    image: ${OPI_IMAGE}
+    restart: always
+    command: 'bash -c "cd /usr/local/OPI/modules/pow20_index && python pow20_index.py"'
+    volumes:
+      - ./configs/pow20_index/.env:/usr/local/OPI/modules/pow20_index/.env
+    depends_on:
+      postgres-opi-server:
+        condition: service_healthy
+  pow20-api:
+    image: ${OPI_IMAGE}
+    command: 'bash -c "cd /usr/local/OPI/modules/pow20_api && node api.js"'
+    volumes:
+      - ./configs/pow20_api/.env:/usr/local/OPI/modules/pow20_api/.env
     depends_on:
       postgres-opi-server:
         condition: service_healthy

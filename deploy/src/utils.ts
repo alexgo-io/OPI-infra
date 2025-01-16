@@ -3,24 +3,34 @@ import { createHash } from 'node:crypto';
 import fs, { readdirSync, readFileSync, statSync } from 'node:fs';
 import path, { join } from 'node:path';
 import * as digitalocean from '@pulumi/digitalocean';
+import { z } from 'zod';
 import { id, name } from './keys';
 
-export function root(filePath: string) {
-  const p = path.resolve(__dirname, `../../${filePath}`);
-  if (fs.existsSync(p)) {
-    return p;
+const WorkspacePathSchema = z.object({
+  relativePath: z.string(),
+  checkExists: z.boolean().default(true),
+}).transform((data) => {
+  const absolutePath = path.resolve(__dirname, `../../${data.relativePath}`);
+  if (data.checkExists && !fs.existsSync(absolutePath)) {
+    throw new Error(`File not found: ${absolutePath}`);
   }
-  throw new Error(`File not found: ${p}`);
+  return {
+    relativePath: data.relativePath,
+    absolutePath,
+    exists: fs.existsSync(absolutePath),
+  };
+});
+
+type WorkspacePath = z.infer<typeof WorkspacePathSchema>;
+
+export function workspace(relativePath: string, checkExists = true): WorkspacePath {
+  return WorkspacePathSchema.parse({ relativePath, checkExists });
 }
 
-export function root$(filePath: string) {
-  return path.resolve(__dirname, `../../${filePath}`);
-}
-
-// convert the absolute path from root(filePath: string) to relative path
-// example: unroot(root(a)) === a
+// convert the absolute path from workspace path to relative path
 export function unroot(filePath: string) {
-  return filePath.replace(root('') + '/', '');
+  const rootPath = path.resolve(__dirname, '../../');
+  return filePath.replace(rootPath + '/', '');
 }
 
 assert(id, 'DIGITAL_OCEAN_SSH_KEY_ID is required');
